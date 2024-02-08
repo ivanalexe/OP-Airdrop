@@ -1,0 +1,55 @@
+WITH intransfer AS (
+    SELECT  evt_block_date, SUM(value/POW(10,18)) AS value
+    FROM    op_optimism.GovernanceToken_evt_Transfer
+    WHERE   to = {{address}}
+    GROUP BY
+            evt_block_date
+),
+outtransfer AS (
+    SELECT  evt_block_date, SUM(-value/POW(10,18)) AS value
+    FROM    op_optimism.GovernanceToken_evt_Transfer
+    WHERE   "from" = {{address}}
+    GROUP BY
+            evt_block_date
+),
+all_date_transfer AS (
+    SELECT  *
+    FROM    intransfer
+    UNION ALL
+    SELECT  *
+    FROM    outtransfer
+    UNION ALL
+    SELECT  DISTINCT date AS evt_block_date, 0 AS value
+    FROM    optimism.blocks
+),
+op_balance AS (
+    SELECT  evt_block_date, SUM(value) OVER (ORDER BY evt_block_date) AS op_balance
+    FROM    (
+        SELECT  evt_block_date, SUM(value) AS value
+        FROM    all_date_transfer
+        GROUP BY
+                evt_block_date
+    )
+),
+expected_airdrop_per_date AS (
+    SELECT  evt_block_date,
+            op_balance,
+            0.67*(op_balance)/365 AS governance_delegation_reward,
+            0.67*2*(op_balance)/365 AS voting_delegate_bonus
+    FROM    op_balance
+    WHERE   DATE(evt_block_date) >= DATE('{{start_date}}')
+    AND     DATE(evt_block_date) <= DATE('{{end_date}}')
+),
+expected_airdrop AS (
+    SELECT  evt_block_date,
+            op_balance,
+            SUM(governance_delegation_reward) OVER (ORDER BY evt_block_date) AS accum_governance_delegation_reward,
+            SUM(voting_delegate_bonus) OVER (ORDER BY evt_block_date) AS accum_voting_delegate_bonus
+    FROM    expected_airdrop_per_date
+)
+SELECT  evt_block_date,
+        op_balance,
+        IF (accum_governance_delegation_reward >= 10000, 10000, accum_governance_delegation_reward) AS accum_governance_delegation_reward,
+        IF (accum_voting_delegate_bonus >= 10000, 10000, accum_voting_delegate_bonus) AS accum_voting_delegate_bonus,
+        accum_governance_delegation_reward+accum_voting_delegate_bonus AS expected_total_airdrop
+FROM    expected_airdrop
